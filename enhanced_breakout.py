@@ -3,8 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-
-# Plotly
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
@@ -33,15 +31,18 @@ def compute_macd(df, fastperiod=12, slowperiod=26, signalperiod=9):
 
 def compute_daily_vwap(df):
     """
-    Approximate daily VWAP for daily data using typical price = (High+Low+Close)/3.
-    Rolling or cumulative approach for demonstration.
+    Compute a 5-day rolling VWAP for daily data using typical price = (High+Low+Close)/3.
     """
     df['TypicalPrice'] = (df['High'] + df['Low'] + df['Close']) / 3
-    # We'll do a 5-day rolling VWAP example
+
     rolling_days = 5
-    rolling_sum_pricevol = (df['TypicalPrice'] * df['Volume']).rolling(rolling_days).sum()
-    rolling_sum_vol = df['Volume'].rolling(rolling_days).sum()
+    rolling_sum_pricevol = (df['TypicalPrice'] * df['Volume']).rolling(rolling_days, min_periods=1).sum()
+    rolling_sum_vol = df['Volume'].rolling(rolling_days, min_periods=1).sum()
+
+    rolling_sum_pricevol, rolling_sum_vol = rolling_sum_pricevol.align(rolling_sum_vol)
+
     df['VWAP'] = rolling_sum_pricevol / rolling_sum_vol
+
     return df
 
 #####################
@@ -49,31 +50,38 @@ def compute_daily_vwap(df):
 #####################
 
 def mark_breakouts(
-    df,
-    vol_threshold=200,
-    price_threshold=2.0,
-    rolling_window=20,
-    consecutive_days=1
+        df,
+        vol_threshold=200,
+        price_threshold=2.0,
+        rolling_window=20,
+        consecutive_days=1
 ):
     """
     Mark breakouts: volume above threshold, price up by threshold%.
     consecutive_days > 1 means volume must be above threshold for N consecutive bars.
     """
-    df['AvgVolume'] = df['Volume'].rolling(rolling_window).mean()
+    df['AvgVolume'] = df['Volume'].rolling(rolling_window, min_periods=1).mean()
+
+    df['Volume'], df['AvgVolume'] = df['Volume'].align(df['AvgVolume'], axis=0, copy=False)
+
     df['VolumeBreakoutSingle'] = df['Volume'] > (vol_threshold / 100.0) * df['AvgVolume']
 
     if consecutive_days > 1:
-        # Rolling sum approach to check consecutive True values in 'VolumeBreakoutSingle'
+
         df['VolConsecutive'] = (
-            df['VolumeBreakoutSingle'].rolling(window=consecutive_days).sum()
+            df['VolumeBreakoutSingle'].rolling(window=consecutive_days, min_periods=1).sum()
         )
-        df['VolumeBreakout'] = df['VolConsecutive'] == consecutive_days
+        df['VolumeBreakout'] = df['VolConsecutive'] >= consecutive_days
     else:
         df['VolumeBreakout'] = df['VolumeBreakoutSingle']
 
     df['BarPctChange'] = df['Close'].pct_change() * 100
     df['PriceBreakout'] = df['BarPctChange'] > price_threshold
+
     df['IsBreakout'] = df['VolumeBreakout'] & df['PriceBreakout']
+
+    df.fillna(False, inplace=True)
+
     return df
 
 def apply_rsi_filter(df, rsi_min=None, rsi_max=None):
@@ -107,8 +115,8 @@ def apply_earnings_filter(df, ticker, buffer_days=2):
     """
     try:
         tk = yf.Ticker(ticker)
-        cal = tk.get_earnings_dates(limit=20)  # May give upcoming or partial historical
-        earnings_dates = cal.index.date  # array of date objects
+        cal = tk.get_earnings_dates(limit=20)
+        earnings_dates = cal.index.date
 
         df_dates = df.index.date
         mask = np.ones(len(df), dtype=bool)
@@ -140,13 +148,12 @@ def parse_date_ranges(text_input):
         line = line.strip()
         if not line:
             continue
-        # Accept possible variants: "2023-07-01 to 2023-07-05" or "2023-07-01 - 2023-07-05"
         if "to" in line:
             parts = line.split("to")
         elif "-" in line:
             parts = line.split("-")
         else:
-            # single date
+
             parts = [line, line]
 
         parts = [p.strip() for p in parts]
@@ -155,7 +162,7 @@ def parse_date_ranges(text_input):
             end_str = parts[1] if len(parts) > 1 else parts[0]
             start_date = pd.to_datetime(start_str).date()
             end_date = pd.to_datetime(end_str).date()
-            # Ensure start_date <= end_date
+
             if start_date > end_date:
                 start_date, end_date = end_date, start_date
             date_ranges.append((start_date, end_date))
@@ -171,12 +178,12 @@ def apply_news_event_range_filter(df, date_ranges):
         return df
 
     df_dates = df.index.date
-    # We'll build a boolean mask where True means "still allowed"
+
     mask = np.ones(len(df), dtype=bool)
 
     for (start_dt, end_dt) in date_ranges:
         in_range = (df_dates >= start_dt) & (df_dates <= end_dt)
-        mask[in_range] = False  # exclude
+        mask[in_range] = False
 
     df['IsBreakout'] = df['IsBreakout'] & mask
     return df
@@ -219,7 +226,6 @@ def simulate_trades(
                 current_price = df['Close'].iloc[j]
                 pct_move = (current_price - entry_price) / entry_price * 100
 
-                # If it hits profit target or stop loss, exit immediately
                 if pct_move >= profit_target_pct:
                     exit_time = df.index[j]
                     exit_price = current_price
@@ -366,8 +372,7 @@ def main():
     st.sidebar.subheader("News / Event Date Ranges")
     st.sidebar.markdown("Enter each range on a new line, e.g.\n```\n2023-07-01 to 2023-07-03\n2023-09-10 - 2023-09-15\n2023-12-25\n```\nSingle date => that exact day is excluded.\n")
     user_event_str = st.sidebar.text_area("Event Date Ranges (one per line)", "")
-    # parse into list of (start_date, end_date)
-    # then exclude breakouts in that range
+
     date_ranges = parse_date_ranges(user_event_str)
 
     benchmark_ticker = st.sidebar.text_input("Benchmark Ticker", value="^GSPC")
@@ -380,7 +385,6 @@ def main():
                 st.error("No data downloaded. Check your parameters.")
                 return
 
-        # compute optional indicators
         with st.spinner("Computing indicators..."):
             if use_rsi:
                 df = compute_rsi(df)
@@ -396,22 +400,18 @@ def main():
                                 rolling_window=20,
                                 consecutive_days=consecutive_days)
 
-            # Apply RSI filter
             if use_rsi:
                 df = apply_rsi_filter(df, rsi_min=rsi_min, rsi_max=rsi_max)
-            # MACD
+
             df = apply_macd_filter(df, use_macd)
-            # VWAP
+
             df = apply_vwap_filter(df, use_vwap)
 
-            # Earnings filter
             if use_earnings_filter:
                 df = apply_earnings_filter(df, ticker, buffer_days=earnings_buffer)
 
-            # News range filter
             df = apply_news_event_range_filter(df, date_ranges)
 
-        # simulate trades
         with st.spinner("Simulating trades..."):
             trades_df = simulate_trades(df,
                                         holding_period=holding_period,
@@ -419,7 +419,6 @@ def main():
                                         profit_target_pct=profit_target_pct,
                                         buy_next_day_open=buy_next_day_open)
 
-        # show results
         if trades_df.empty:
             st.warning("No trades triggered.")
         else:
