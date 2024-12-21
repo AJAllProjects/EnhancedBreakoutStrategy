@@ -31,18 +31,33 @@ def compute_macd(df, fastperiod=12, slowperiod=26, signalperiod=9):
 
 def compute_daily_vwap(df):
     """
-    Compute a 5-day rolling VWAP for daily data using typical price = (High+Low+Close)/3.
+    Computes a 5-day rolling VWAP for daily data using typical price.
+    If the DataFrame has multi-level columns, we flatten them.
     """
-    df['TypicalPrice'] = (df['High'] + df['Low'] + df['Close']) / 3
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join(col).strip() for col in df.columns.values]
+        rename_map = {
+            "Open_": "Open",
+            "High_": "High",
+            "Low_": "Low",
+            "Close_": "Close",
+            "Adj Close_": "Adj Close",
+            "Volume_": "Volume"
+        }
+        df.rename(columns=rename_map, inplace=True)
+
+    df["TypicalPrice"] = (df["High"] + df["Low"] + df["Close"]) / 3
 
     rolling_days = 5
-    rolling_sum_pricevol = (df['TypicalPrice'] * df['Volume']).rolling(rolling_days, min_periods=1).sum()
-    rolling_sum_vol = df['Volume'].rolling(rolling_days, min_periods=1).sum()
+    rolling_sum_pricevol = (df["TypicalPrice"] * df["Volume"]).rolling(rolling_days, min_periods=1).sum()
+    rolling_sum_vol = df["Volume"].rolling(rolling_days, min_periods=1).sum()
 
-    rolling_sum_pricevol, rolling_sum_vol = rolling_sum_pricevol.align(rolling_sum_vol)
+    if isinstance(rolling_sum_pricevol, pd.DataFrame):
+        rolling_sum_pricevol = rolling_sum_pricevol.squeeze(axis=1)
+    if isinstance(rolling_sum_vol, pd.DataFrame):
+        rolling_sum_vol = rolling_sum_vol.squeeze(axis=1)
 
-    df['VWAP'] = rolling_sum_pricevol / rolling_sum_vol
-
+    df["VWAP"] = rolling_sum_pricevol / rolling_sum_vol
     return df
 
 #####################
@@ -56,10 +71,6 @@ def mark_breakouts(
         rolling_window=20,
         consecutive_days=1
 ):
-    """
-    Mark breakouts: volume above threshold, price up by threshold%.
-    consecutive_days > 1 means volume must be above threshold for N consecutive bars.
-    """
     df['AvgVolume'] = df['Volume'].rolling(rolling_window, min_periods=1).mean()
 
     df['Volume'], df['AvgVolume'] = df['Volume'].align(df['AvgVolume'], axis=0, copy=False)
@@ -67,7 +78,6 @@ def mark_breakouts(
     df['VolumeBreakoutSingle'] = df['Volume'] > (vol_threshold / 100.0) * df['AvgVolume']
 
     if consecutive_days > 1:
-
         df['VolConsecutive'] = (
             df['VolumeBreakoutSingle'].rolling(window=consecutive_days, min_periods=1).sum()
         )
@@ -81,11 +91,9 @@ def mark_breakouts(
     df['IsBreakout'] = df['VolumeBreakout'] & df['PriceBreakout']
 
     df.fillna(False, inplace=True)
-
     return df
 
 def apply_rsi_filter(df, rsi_min=None, rsi_max=None):
-    """ Only keep breakouts if RSI is within [rsi_min, rsi_max]. """
     if rsi_min is not None:
         df['IsBreakout'] = df['IsBreakout'] & (df['RSI'] >= rsi_min)
     if rsi_max is not None:
@@ -93,13 +101,11 @@ def apply_rsi_filter(df, rsi_min=None, rsi_max=None):
     return df
 
 def apply_macd_filter(df, use_macd):
-    """ Keep breakouts only if MACD > MACD_signal (bullish). """
     if use_macd:
         df['IsBreakout'] = df['IsBreakout'] & (df['MACD'] > df['MACD_signal'])
     return df
 
 def apply_vwap_filter(df, use_vwap):
-    """ Keep breakouts only if Close > VWAP. """
     if use_vwap:
         df['IsBreakout'] = df['IsBreakout'] & (df['Close'] > df['VWAP'])
     return df
@@ -109,10 +115,6 @@ def apply_vwap_filter(df, use_vwap):
 ######################
 
 def apply_earnings_filter(df, ticker, buffer_days=2):
-    """
-    Exclude breakouts within +/- buffer_days of an earnings date.
-    Note: historical coverage from yfinance can be limited.
-    """
     try:
         tk = yf.Ticker(ticker)
         cal = tk.get_earnings_dates(limit=20)
@@ -137,11 +139,6 @@ def apply_earnings_filter(df, ticker, buffer_days=2):
 #########################
 
 def parse_date_ranges(text_input):
-    """
-    Parses user-supplied lines of "YYYY-MM-DD to YYYY-MM-DD" or "YYYY-MM-DD - YYYY-MM-DD".
-    Returns a list of (start_date, end_date) as date objects.
-    If there's a single date, e.g. "YYYY-MM-DD", treat that as (date, date).
-    """
     date_ranges = []
     lines = text_input.strip().split("\n")
     for line in lines:
@@ -153,7 +150,6 @@ def parse_date_ranges(text_input):
         elif "-" in line:
             parts = line.split("-")
         else:
-
             parts = [line, line]
 
         parts = [p.strip() for p in parts]
@@ -171,14 +167,10 @@ def parse_date_ranges(text_input):
     return date_ranges
 
 def apply_news_event_range_filter(df, date_ranges):
-    """
-    Exclude breakouts that occur on any date within the specified date ranges.
-    """
     if not date_ranges:
         return df
 
     df_dates = df.index.date
-
     mask = np.ones(len(df), dtype=bool)
 
     for (start_dt, end_dt) in date_ranges:
@@ -264,9 +256,17 @@ def simulate_trades(
 
 def benchmark_performance(benchmark_ticker, start_date, end_date, interval):
     bench_df = yf.download(benchmark_ticker, start=start_date, end=end_date, interval=interval)
+
+    if isinstance(bench_df.columns, pd.MultiIndex):
+        if benchmark_ticker in bench_df.columns.levels[1]:
+            bench_df = bench_df.xs(benchmark_ticker, axis=1, level=1, drop_level=True)
+        else:
+            bench_df.columns = ["_".join(col).strip() for col in bench_df.columns.values]
+
     bench_df.dropna(inplace=True)
     if len(bench_df) < 2:
         return np.nan, np.nan, np.nan
+
     buy_price = bench_df['Close'].iloc[0]
     sell_price = bench_df['Close'].iloc[-1]
     bench_return = (sell_price - buy_price) / buy_price * 100
@@ -277,6 +277,7 @@ def benchmark_performance(benchmark_ticker, start_date, end_date, interval):
 ################
 
 def plot_price_breakouts(df, ticker, theme="plotly_white"):
+    """Basic price chart with candlestick + breakout markers."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
         go.Candlestick(
@@ -311,6 +312,105 @@ def plot_price_breakouts(df, ticker, theme="plotly_white"):
         template=theme,
         hovermode="x unified"
     )
+    return fig
+
+def plot_technical_indicators(df, ticker, theme="plotly_white"):
+    """
+    Creates a multi-row figure showing:
+    - Row 1: MACD (line & signal) + histogram
+    - Row 2: RSI
+    - Row 3: VWAP line (with 'Close' as reference)
+    """
+
+    rows = 3
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                        subplot_titles=[f"MACD - {ticker}",
+                                        f"RSI - {ticker}",
+                                        f"VWAP - {ticker}"])
+
+    if 'MACD' in df.columns and 'MACD_signal' in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['MACD'],
+                mode='lines',
+                name='MACD',
+                line=dict(color='blue')
+            ),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['MACD_signal'],
+                mode='lines',
+                name='MACD_signal',
+                line=dict(color='orange')
+            ),
+            row=1, col=1
+        )
+        if 'MACD_hist' in df.columns:
+            fig.add_trace(
+                go.Bar(
+                    x=df.index,
+                    y=df['MACD_hist'],
+                    name='MACD_hist',
+                    marker_color='gray',
+                    opacity=0.5
+                ),
+                row=1, col=1
+            )
+
+    if 'RSI' in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['RSI'],
+                mode='lines',
+                name='RSI',
+                line=dict(color='purple')
+            ),
+            row=2, col=1
+        )
+        fig.add_hrect(
+            y0=70, y1=70, line_width=1, line_dash="dot", line_color="red",
+            row=2, col=1
+        )
+        fig.add_hrect(
+            y0=30, y1=30, line_width=1, line_dash="dot", line_color="green",
+            row=2, col=1
+        )
+
+    if 'VWAP' in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['Close'],
+                mode='lines',
+                name='Close',
+                line=dict(color='black')
+            ),
+            row=3, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['VWAP'],
+                mode='lines',
+                name='VWAP',
+                line=dict(color='magenta')
+            ),
+            row=3, col=1
+        )
+
+    fig.update_layout(
+        template=theme,
+        hovermode="x unified"
+    )
+    fig.update_yaxes(title_text="MACD", row=1, col=1)
+    fig.update_yaxes(title_text="RSI", row=2, col=1)
+    fig.update_yaxes(title_text="Price/VWAP", row=3, col=1)
+
     return fig
 
 def plot_trade_returns_distribution(trades_df, theme="plotly_white"):
@@ -370,7 +470,10 @@ def main():
     earnings_buffer = st.sidebar.number_input("Earnings Buffer Days", 0, 10, 2) if use_earnings_filter else 0
 
     st.sidebar.subheader("News / Event Date Ranges")
-    st.sidebar.markdown("Enter each range on a new line, e.g.\n```\n2023-07-01 to 2023-07-03\n2023-09-10 - 2023-09-15\n2023-12-25\n```\nSingle date => that exact day is excluded.\n")
+    st.sidebar.markdown(
+        "Enter each range on a new line, e.g.\n```\n2023-07-01 to 2023-07-03\n2023-09-10 - 2023-09-15\n2023-12-25\n```\n"
+        "Single date => that exact day is excluded.\n"
+    )
     user_event_str = st.sidebar.text_area("Event Date Ranges (one per line)", "")
 
     date_ranges = parse_date_ranges(user_event_str)
@@ -381,6 +484,13 @@ def main():
     if st.sidebar.button("Run Strategy"):
         with st.spinner("Fetching data..."):
             df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
+
+            if isinstance(df.columns, pd.MultiIndex):
+                if ticker in df.columns.levels[1]:
+                    df = df.xs(ticker, axis=1, level=1, drop_level=True)
+                else:
+                    df.columns = ["_".join(col).strip() for col in df.columns.values]
+
             if df.empty:
                 st.error("No data downloaded. Check your parameters.")
                 return
@@ -394,17 +504,18 @@ def main():
                 df = compute_daily_vwap(df)
 
         with st.spinner("Marking breakouts..."):
-            df = mark_breakouts(df,
-                                vol_threshold=vol_threshold,
-                                price_threshold=price_threshold,
-                                rolling_window=20,
-                                consecutive_days=consecutive_days)
+            df = mark_breakouts(
+                df,
+                vol_threshold=vol_threshold,
+                price_threshold=price_threshold,
+                rolling_window=20,
+                consecutive_days=consecutive_days
+            )
 
             if use_rsi:
                 df = apply_rsi_filter(df, rsi_min=rsi_min, rsi_max=rsi_max)
 
             df = apply_macd_filter(df, use_macd)
-
             df = apply_vwap_filter(df, use_vwap)
 
             if use_earnings_filter:
@@ -413,11 +524,13 @@ def main():
             df = apply_news_event_range_filter(df, date_ranges)
 
         with st.spinner("Simulating trades..."):
-            trades_df = simulate_trades(df,
-                                        holding_period=holding_period,
-                                        stop_loss_pct=stop_loss_pct,
-                                        profit_target_pct=profit_target_pct,
-                                        buy_next_day_open=buy_next_day_open)
+            trades_df = simulate_trades(
+                df,
+                holding_period=holding_period,
+                stop_loss_pct=stop_loss_pct,
+                profit_target_pct=profit_target_pct,
+                buy_next_day_open=buy_next_day_open
+            )
 
         if trades_df.empty:
             st.warning("No trades triggered.")
@@ -444,7 +557,12 @@ def main():
         fig_price = plot_price_breakouts(df, ticker, theme=plot_theme)
         st.plotly_chart(fig_price, use_container_width=True)
 
+        st.subheader("Technical Indicators")
+        fig_indicators = plot_technical_indicators(df, ticker, theme=plot_theme)
+        st.plotly_chart(fig_indicators, use_container_width=True)
+
         bench_buy, bench_sell, bench_return = benchmark_performance(benchmark_ticker, start_date, end_date, interval)
+
         st.subheader("Benchmark Performance")
         if not np.isnan(bench_return):
             st.write(f"{benchmark_ticker} Buy Price: {bench_buy:.2f}")
@@ -453,12 +571,21 @@ def main():
         else:
             st.warning("Could not fetch benchmark data or not enough data for benchmark.")
 
+        st.subheader("Download Full Data & Trades")
+        full_data_csv = df.to_csv(index=True)
+        st.download_button(
+            label="Download Full Data CSV",
+            data=full_data_csv,
+            file_name=f"{ticker}_full_data.csv",
+            mime="text/csv"
+        )
+
         if not trades_df.empty:
             csv_data = trades_df.to_csv(index=False)
             st.download_button(
                 label="Download Trades CSV",
                 data=csv_data,
-                file_name=f"{ticker}_news_range_filtered_trades.csv",
+                file_name=f"{ticker}_trades.csv",
                 mime="text/csv"
             )
 
